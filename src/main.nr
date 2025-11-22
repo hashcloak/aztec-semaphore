@@ -3,7 +3,7 @@ use dep::aztec::macros::aztec;
 #[aztec]
 pub contract Semaphore {
     use dep::aztec::protocol_types::traits::{Deserialize, Packable, Serialize};
-    use aztec::macros::functions::{external, internal};
+    use aztec::macros::functions::{external, internal/*, initializer*/};
     use aztec::{macros::storage::{self, storage}, state_vars::{Map, PublicMutable}};
     use binary_merkle_root::binary_merkle_root;
     use ec::bjj::BabyJubJubParams;
@@ -12,10 +12,14 @@ pub contract Semaphore {
     use ec::ScalarField;
     use poseidon::poseidon2::Poseidon2;
     use std::field::bn254::assert_lt;
+    use merkle_trees::merkle::MerkleTree;
+    use merkle_trees::types::{MT_Creator, Modifier};
+    // use aztec::protocol_types::address::AztecAddress;
 
     #[derive(Deserialize, Packable, Serialize, Eq)]
     struct Group {
         merkleTree: Field,
+        next_member_index: u64,
     }
 
     #[storage]
@@ -23,6 +27,34 @@ pub contract Semaphore {
         next_group_id: PublicMutable<Field, Context>,
         groups: Map<Field, PublicMutable<Group, Context>, Context>,
         nullifiers: Map<Field, PublicMutable<bool, Context>, Context>,
+    }
+
+    #[external("public")]
+    fn initialize_group(id: Field) {
+        // let mt = MerkleTree::<Field>::new(poseidon2_hash_2);
+        let groups = storage.groups;
+        let g = Group {
+            merkleTree: Field::from(0),
+            next_member_index: 0,
+        };
+        groups.at(id).write(g);
+    }
+
+    #[external("public")]
+    fn add_member(
+        group_id: Field,
+        member: Field,
+    ) {
+        let groups = storage.groups;
+        let mut group = groups.at(group_id).read();
+        let mut mt = MerkleTree::<Field>::from(
+            group.merkleTree,
+            poseidon2_hash_2,
+        );
+        mt.add(member, Field::from(group.next_member_index), [Field::from(0); 10]);
+        group.merkleTree = mt.root;
+        group.next_member_index += 1;
+        groups.at(group_id).write(group);
     }
 
     global MAX_DEPTH: u32 = 10;
