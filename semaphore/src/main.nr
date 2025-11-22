@@ -15,6 +15,7 @@ pub contract Semaphore {
     use poseidon::poseidon2::Poseidon2;
     use std::field::bn254::assert_lt;
     use aztec::protocol_types::address::AztecAddress;
+    use lean_imt::LeanIMT;
 
     #[derive(Deserialize, Packable, Serialize, Eq)]
     struct Group {
@@ -63,12 +64,18 @@ pub contract Semaphore {
     fn add_member(
         group_id: Field,
         member: Field,
+        tree_address: AztecAddress,
     ) {
         // Only admin can add members
         assert_eq(storage.admin.read(), context.msg_sender().unwrap());
 
         let groups = storage.groups;
         let mut group = groups.at(group_id).read();
+
+        // Call LeanIMT contract to insert the member
+        LeanIMT::at(tree_address)
+            .insert(member).call(&mut context);
+
         let mut mt = MerkleTree::<Field>::from(group.merkleTree, poseidon2_hash_2);
         mt.add(member, Field::from(group.next_member_index), [Field::from(0); 10]);
         group.merkleTree = mt.root;
