@@ -3,17 +3,17 @@ use dep::aztec::macros::aztec;
 #[aztec]
 pub contract Semaphore {
     use dep::aztec::protocol_types::traits::{Deserialize, Packable, Serialize};
-    use aztec::macros::functions::{external, internal/*, initializer*/};
+    use aztec::macros::functions::{external, internal};
     use aztec::{macros::storage::{self, storage}, state_vars::{Map, PublicMutable}};
     use binary_merkle_root::binary_merkle_root;
     use ec::bjj::BabyJubJubParams;
     use ec::Curve;
     use ec::CurveTrait;
     use ec::ScalarField;
+    use merkle_trees::merkle::MerkleTree;
+    use merkle_trees::types::{Modifier, MT_Creator};
     use poseidon::poseidon2::Poseidon2;
     use std::field::bn254::assert_lt;
-    use merkle_trees::merkle::MerkleTree;
-    use merkle_trees::types::{MT_Creator, Modifier};
     // use aztec::protocol_types::address::AztecAddress;
 
     #[derive(Deserialize, Packable, Serialize, Eq)]
@@ -27,30 +27,22 @@ pub contract Semaphore {
         next_group_id: PublicMutable<Field, Context>,
         groups: Map<Field, PublicMutable<Group, Context>, Context>,
         nullifiers: Map<Field, PublicMutable<bool, Context>, Context>,
+        tally: Map<Field, Map<Field, PublicMutable<Field, Context>, Context>, Context>, // (groupID -> (candidate -> vote_count))
     }
 
     #[external("public")]
     fn initialize_group(id: Field) {
         // let mt = MerkleTree::<Field>::new(poseidon2_hash_2);
         let groups = storage.groups;
-        let g = Group {
-            merkleTree: Field::from(0),
-            next_member_index: 0,
-        };
+        let g = Group { merkleTree: Field::from(0), next_member_index: 0 };
         groups.at(id).write(g);
     }
 
     #[external("public")]
-    fn add_member(
-        group_id: Field,
-        member: Field,
-    ) {
+    fn add_member(group_id: Field, member: Field) {
         let groups = storage.groups;
         let mut group = groups.at(group_id).read();
-        let mut mt = MerkleTree::<Field>::from(
-            group.merkleTree,
-            poseidon2_hash_2,
-        );
+        let mut mt = MerkleTree::<Field>::from(group.merkleTree, poseidon2_hash_2);
         mt.add(member, Field::from(group.next_member_index), [Field::from(0); 10]);
         group.merkleTree = mt.root;
         group.next_member_index += 1;
@@ -73,15 +65,31 @@ pub contract Semaphore {
         Poseidon2::hash(input, 2)
     }
 
+    #[external("public")]
+    #[internal]
+    fn _verify_and_vote(root: Field, nullifier: Field, group_id: Field, candidate: Field) {
+        // check root
+        let current_root = storage.groups.at(group_id).read().merkleTree;
+        assert_eq(root, current_root);
+        //assert nullifier does not exists
+        assert_eq(storage.nullifiers.at(nullifier).read(), false);
+        //store nullifier
+        storage.nullifiers.at(nullifier).write(true);
+        // cast the vote
+        let new_tally = storage.tally.at(group_id).at(candidate).read() + 1;
+        storage.tally.at(group_id).at(candidate).write(new_tally);
+    }
+
     #[external("private")]
     #[internal]
-    fn verify_vote(
+    fn vote(
         secret_key: Field,
         index_bits: [u1; MAX_DEPTH], // these bits indicate the order of inputs for hashing of the merkle proof
         hash_path: [Field; MAX_DEPTH], // the Merkle Tree inclusion proof
         merkle_proof_length: u32, // the number of non-zero elements in hash_path
         hashed_scope: Field,
-        hashed_message: Field,
+        candidate: Field,
+        group_id: Field,
     ) {
         // Part 1
         // Ensure secret_key < l.
@@ -115,12 +123,9 @@ pub contract Semaphore {
         let nullifier = poseidon2_hash_2([hashed_scope, secret_key]);
 
         // TODO: compare the nullifier and root to the public storage & update the nullifier map
-        //Semaphore::at(context.this_address())
-        //         ._verify_root_and_nullifier(
-        //             root, nullifier
-        //         )
-        //         .enqueue(&mut context);
-
+        Semaphore::at(context.this_address())
+            ._verify_and_vote(root, nullifier, group_id, candidate)
+            .enqueue(&mut context);
     }
 
 }
