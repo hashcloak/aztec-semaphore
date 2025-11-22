@@ -2,8 +2,8 @@ use dep::aztec::macros::aztec;
 
 #[aztec]
 pub contract Semaphore {
-    use dep::aztec::protocol_types::traits::{Deserialize, Packable, Serialize};
-    use aztec::macros::functions::{external, internal};
+    use dep::aztec::protocol_types::traits::{Deserialize, Packable, Serialize, FromField};
+    use aztec::macros::functions::{external, internal, initializer};
     use aztec::{macros::storage::{self, storage}, state_vars::{Map, PublicMutable}};
     use binary_merkle_root::binary_merkle_root;
     use ec::bjj::BabyJubJubParams;
@@ -14,7 +14,7 @@ pub contract Semaphore {
     use merkle_trees::types::{Modifier, MT_Creator};
     use poseidon::poseidon2::Poseidon2;
     use std::field::bn254::assert_lt;
-    // use aztec::protocol_types::address::AztecAddress;
+    use aztec::protocol_types::address::AztecAddress;
 
     #[derive(Deserialize, Packable, Serialize, Eq)]
     struct Group {
@@ -28,10 +28,31 @@ pub contract Semaphore {
         groups: Map<Field, PublicMutable<Group, Context>, Context>,
         nullifiers: Map<Field, PublicMutable<bool, Context>, Context>,
         tally: Map<Field, Map<Field, PublicMutable<Field, Context>, Context>, Context>, // (groupID -> (candidate -> vote_count))
+        admin: PublicMutable<AztecAddress, Context>,
+    }
+
+    #[initializer]
+    #[external("public")]
+    fn init(admin: AztecAddress) {
+        let admin_storage = storage.admin;
+        admin_storage.write(admin);
     }
 
     #[external("public")]
+    fn update_admin(new_admin: AztecAddress) {
+        // Only admin can update admin
+        assert_eq(storage.admin.read(), context.msg_sender().unwrap());
+
+        let admin_storage = storage.admin;
+        admin_storage.write(new_admin);
+    }
+
+
+    #[external("public")]
     fn initialize_group(id: Field) {
+        // Only admin can initialize groups
+        assert_eq(storage.admin.read(), context.msg_sender().unwrap());
+
         // let mt = MerkleTree::<Field>::new(poseidon2_hash_2);
         let groups = storage.groups;
         let g = Group { merkleTree: Field::from(0), next_member_index: 0 };
@@ -39,7 +60,13 @@ pub contract Semaphore {
     }
 
     #[external("public")]
-    fn add_member(group_id: Field, member: Field) {
+    fn add_member(
+        group_id: Field,
+        member: Field,
+    ) {
+        // Only admin can add members
+        assert_eq(storage.admin.read(), context.msg_sender().unwrap());
+
         let groups = storage.groups;
         let mut group = groups.at(group_id).read();
         let mut mt = MerkleTree::<Field>::from(group.merkleTree, poseidon2_hash_2);
