@@ -11,3 +11,4 @@ merkle_trees = { git = "https://github.com/zk-kit/zk-kit.noir", tag = "merkle-tr
 poseidon = { tag = "v0.1.1", git = "https://github.com/noir-lang/poseidon" }
 ec = { git = "https://github.com/noir-lang/noir-edwards", tag = "v0.2.5"}
 lean_imt = { path = "../lean_imt" }
+callback_interface = { path = "../callback_interface" }

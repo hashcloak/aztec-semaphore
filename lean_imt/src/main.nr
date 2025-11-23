@@ -61,4 +61,10 @@ pub contract LeanIMT {
         storage.leaves.at(leaf).write(index);
     }
 
+    #[external("public")]
+    fn get_root() -> Field {
+        let tree_depth = storage.depth.read();
+        storage.sideNodes.at(tree_depth).read()
+    }
+
 }
