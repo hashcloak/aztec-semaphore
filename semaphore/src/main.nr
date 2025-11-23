@@ -2,62 +2,70 @@ use dep::aztec::macros::aztec;
 
 #[aztec]
 pub contract Semaphore {
-    use dep::aztec::protocol_types::traits::{Deserialize, Packable, Serialize, FromField};
-    use aztec::macros::functions::{external, internal, initializer};
+    use aztec::macros::functions::{external, initializer, internal};
     use aztec::{macros::storage::{self, storage}, state_vars::{Map, PublicMutable}};
-    use binary_merkle_root::binary_merkle_root;
-    use ec::bjj::BabyJubJubParams;
-    use ec::Curve;
-    use ec::CurveTrait;
-    use ec::ScalarField;
-    use merkle_trees::merkle::MerkleTree;
-    use merkle_trees::types::{Modifier, MT_Creator};
-    use poseidon::poseidon2::Poseidon2;
-    use std::field::bn254::assert_lt;
     use aztec::protocol_types::address::AztecAddress;
+    use binary_merkle_root::binary_merkle_root;
     use lean_imt::LeanIMT;
+    use poseidon::poseidon2::Poseidon2;
+    use callback_interface::CallbackInterface;
 
-    #[derive(Deserialize, Packable, Serialize, Eq)]
-    struct Group {
-        merkleTree: Field,
-        next_member_index: u64,
-    }
+    global MAX_DEPTH: u32 = 10;
 
     #[storage]
     struct Storage<Context> {
-        next_group_id: PublicMutable<Field, Context>,
-        groups: Map<Field, PublicMutable<Group, Context>, Context>,
-        nullifiers: Map<Field, PublicMutable<bool, Context>, Context>,
-        tally: Map<Field, Map<Field, PublicMutable<Field, Context>, Context>, Context>, // (groupID -> (candidate -> vote_count))
-        admin: PublicMutable<AztecAddress, Context>,
+        // groupID -> MerkleTree contract address
+        merkle_trees: Map<Field, PublicMutable<AztecAddress, Context>, Context>,
+        // groupID -> admin address
+        admins: Map<Field, PublicMutable<AztecAddress, Context>, Context>,
+
+        // Groups mapping
+        // in semaphore we have mapping(uint256 => Group) public groups where Group has the below components
+        group_merkle_tree_duration: Map<Field, PublicMutable<Field, Context>, Context>,
+        group_merkle_tree_creation_date: Map<Field, Map<Field, PublicMutable<Field, Context>, Context>, Context>,
+        group_nullifiers: Map<Field, Map<Field, PublicMutable<bool, Context>, Context>, Context>,
+
+        group_counter: PublicMutable<Field, Context>,
     }
 
+    // Initializing the contract with an admin and a tree contract address
     #[initializer]
     #[external("public")]
-    fn init(admin: AztecAddress) {
-        let admin_storage = storage.admin;
-        admin_storage.write(admin);
+    fn initialize(admin: AztecAddress, group_id: Field, tree_address: AztecAddress) {
+        let admin_storage = storage.admins;
+        admin_storage.at(group_id).write(admin);
+
+        let tree_storage = storage.merkle_trees;
+        tree_storage.at(group_id).write(tree_address);
+
     }
 
     #[external("public")]
-    fn update_admin(new_admin: AztecAddress) {
+    fn update_admin(new_admin: AztecAddress, group_id: Field) {
+
         // Only admin can update admin
-        assert_eq(storage.admin.read(), context.msg_sender().unwrap());
+        assert_eq(storage.admins.at(group_id).read(), context.msg_sender().unwrap());
 
-        let admin_storage = storage.admin;
-        admin_storage.write(new_admin);
+        let admin_storage = storage.admins;
+        admin_storage.at(group_id).write(new_admin);
     }
 
 
     #[external("public")]
-    fn initialize_group(id: Field) {
-        // Only admin can initialize groups
-        assert_eq(storage.admin.read(), context.msg_sender().unwrap());
+    fn create_group(tree_address: AztecAddress, admin_address: AztecAddress) {
+        
+        let group_id_storage = storage.group_counter;
+        let group_id = group_id_storage.read() + Field::from(1);
+        group_id_storage.write(group_id);
+        let admin_storage = storage.admins;
+        admin_storage.at(group_id).write(admin_address);
 
-        // let mt = MerkleTree::<Field>::new(poseidon2_hash_2);
-        let groups = storage.groups;
-        let g = Group { merkleTree: Field::from(0), next_member_index: 0 };
-        groups.at(id).write(g);
+        let tree_storage = storage.merkle_trees;
+        tree_storage.at(group_id).write(tree_address);
+
+        let group_merkle_tree_duration_storage = storage.group_merkle_tree_duration;
+        group_merkle_tree_duration_storage.at(group_id).write(Field::from(3600)); // 1hr
+
     }
 
     #[external("public")]
@@ -67,98 +75,70 @@ pub contract Semaphore {
         tree_address: AztecAddress,
     ) {
         // Only admin can add members
-        assert_eq(storage.admin.read(), context.msg_sender().unwrap());
-
-        let groups = storage.groups;
-        let mut group = groups.at(group_id).read();
+        assert_eq(storage.admins.at(group_id).read(), context.msg_sender().unwrap());
 
         // Call LeanIMT contract to insert the member
         LeanIMT::at(tree_address)
             .insert(member).call(&mut context);
 
-        let mut mt = MerkleTree::<Field>::from(group.merkleTree, poseidon2_hash_2);
-        mt.add(member, Field::from(group.next_member_index), [Field::from(0); 10]);
-        group.merkleTree = mt.root;
-        group.next_member_index += 1;
-        groups.at(group_id).write(group);
     }
 
-    global MAX_DEPTH: u32 = 10;
-    // This is a 251 bit value.
-    global L: Field = 2736030358979909402780800718157159386076813972158567259200215660948447373041;
+    #[external("public")]
+    #[internal]
+    fn validate(group_id: Field, nullifier: Field, root: Field, tree_address: AztecAddress, call_back: AztecAddress) {
+        let nullifiers_map = storage.group_nullifiers;
+        let res = nullifiers_map.at(group_id).at(nullifier).read();
 
-    // Generator point of Baby Jubjub curve.
-    // ref: https://github.com/noir-lang/noir-edwards/blob/main/src/test.nr#L6C8-L6C13
-    global BASE8: [Field; 2] = [
-        5299619240641551281634865583518297030282874472190772894086521144482721001553,
-        16950150798460657717958625567821834550301663161624707787222815936182638968203,
-    ];
+        assert_eq(res, false);
+
+        let root2 = LeanIMT::at(tree_address)
+            .get_root().call(&mut context);
+        
+        assert_eq(root, root2);
+
+        nullifiers_map.at(group_id).at(nullifier).write(true);
+
+        // Notify the calling contract that the proof has been validated
+        CallbackInterface::at(call_back)
+            .callback(group_id)
+            .call(&mut context);
+    }
 
     #[contract_library_method]
     fn poseidon2_hash_2(input: [Field; 2]) -> Field {
         Poseidon2::hash(input, 2)
     }
 
-    #[external("public")]
-    #[internal]
-    fn _verify_and_vote(root: Field, nullifier: Field, group_id: Field, candidate: Field) {
-        // check root
-        let current_root = storage.groups.at(group_id).read().merkleTree;
-        assert_eq(root, current_root);
-        //assert nullifier does not exists
-        assert_eq(storage.nullifiers.at(nullifier).read(), false);
-        //store nullifier
-        storage.nullifiers.at(nullifier).write(true);
-        // cast the vote
-        let new_tally = storage.tally.at(group_id).at(candidate).read() + 1;
-        storage.tally.at(group_id).at(candidate).write(new_tally);
-    }
-
     #[external("private")]
-    #[internal]
-    fn vote(
+    fn verify_proof(
         secret_key: Field,
+        passport_id: Field,
         index_bits: [u1; MAX_DEPTH], // these bits indicate the order of inputs for hashing of the merkle proof
         hash_path: [Field; MAX_DEPTH], // the Merkle Tree inclusion proof
         merkle_proof_length: u32, // the number of non-zero elements in hash_path
         hashed_scope: Field,
         candidate: Field,
         group_id: Field,
+        tree_address: AztecAddress,
     ) {
-        // Part 1
-        // Ensure secret_key < l.
-        assert_lt(secret_key, L);
-
-        // Identity generation.
-        // The public key is derived by multiplying the generator point with the secret key,
-        // interpreted as a scalar.
-        let generator: Curve<BabyJubJubParams> = Curve { x: BASE8[0], y: BASE8[1] };
-        // ScalarField is parameterised by the number of 4-bit slices it contains.
-        // Since secret key is already known to be max 251 bits, there are 63 slices.
-        let secret_scalar: ScalarField<63> = ScalarField::from(secret_key);
-        let pubkey = generator.mul(secret_scalar);
-
-        // Obtain the identity commitment by hashing the public key
-        let identity_commitment = poseidon2_hash_2([pubkey.x, pubkey.y]);
-
         // Part 2
         // Calculates merkle root by repeatedly hashing with the elements from the merkle proof.
         // Depending on the index bit, we swap the siblings for hashing or not.
         let root = binary_merkle_root(
             poseidon2_hash_2,
-            identity_commitment,
+            passport_id,
             merkle_proof_length,
             index_bits,
             hash_path,
         );
 
-        // Part 3
+          // Part 3
         // Obtain the nullifier by hashing the hashed scope and secret key.
         let nullifier = poseidon2_hash_2([hashed_scope, secret_key]);
 
-        // TODO: compare the nullifier and root to the public storage & update the nullifier map
+         // TODO: compare the nullifier and root to the public storage & update the nullifier map
         Semaphore::at(context.this_address())
-            ._verify_and_vote(root, nullifier, group_id, candidate)
+            .validate(group_id, nullifier, root, tree_address, context.msg_sender().unwrap())
             .enqueue(&mut context);
     }
 
